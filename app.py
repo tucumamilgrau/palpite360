@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src import betting, config, crossing, data_sources, data_sources_api_football, elo, poisson_model, stats
+from src import betting, config, crossing, data_sources, data_sources_api_football, elo, fixtures, poisson_model, stats
 from src.leagues import all_leagues
 
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
@@ -150,6 +150,111 @@ def render_team_card(col, report: dict, elo_rating: float | None):
             st.caption("Esta liga só disponibiliza dados de placar gratuitamente (sem chutes/escanteios/cartões).")
 
 
+def render_matchup_report(df, team_a: str, team_b: str, last_n: int | None):
+    """Relatório completo (cards, cruzamento, Poisson, apostas) para um
+    confronto. Reaproveitado tanto no fluxo manual quanto na geração em
+    lote de vários confrontos selecionados de uma vez."""
+    report_a_all = stats.team_report(df, team_a, last_n=last_n, venue="all")
+    report_b_all = stats.team_report(df, team_b, last_n=last_n, venue="all")
+    report_a_home = stats.team_report(df, team_a, last_n=last_n, venue="home")
+    report_b_away = stats.team_report(df, team_b, last_n=last_n, venue="away")
+    league_avg = stats.league_averages(df)
+    ratings = elo.compute_ratings(df)
+
+    st.divider()
+    st.header(f"{team_a} × {team_b}")
+    col1, col2 = st.columns(2)
+    render_team_card(col1, report_a_all, ratings.get(team_a))
+    render_team_card(col2, report_b_all, ratings.get(team_b))
+
+    st.subheader("Cruzamento de dados")
+    findings = crossing.cross_analysis(report_a_all, report_b_all)
+    if not findings:
+        st.write("Dados insuficientes para cruzamento nesta janela.")
+    for f in findings:
+        tag = ""
+        if f.get("favor_a"):
+            tag = f"🟢 favorece {team_a}"
+        elif f.get("favor_b"):
+            tag = f"🟢 favorece {team_b}"
+        st.markdown(f"**{f['indicador']}** — {team_a}: `{f['time_a']}` · {team_b}: `{f['time_b']}` {tag}")
+        st.caption(f["explicacao"])
+
+    if report_a_home.get("n_games") and report_b_away.get("n_games"):
+        st.subheader("Estimativa de placar (Poisson)")
+        pred = poisson_model.predict(report_a_home, report_b_away, league_avg)
+
+        st.caption(
+            f"Gols esperados: {team_a} {pred['xg_casa']} × {pred['xg_fora']} {team_b} "
+            f"(baseado no ataque de {team_a} em casa e defesa de {team_b} fora, e vice-versa)."
+        )
+        render_metric_grid([
+            (f"Vitória {team_a}", f"{pred['vitoria_casa_pct']}%"),
+            ("Empate", f"{pred['empate_pct']}%"),
+            (f"Vitória {team_b}", f"{pred['vitoria_fora_pct']}%"),
+        ])
+
+        st.markdown("**Gols (Over)**")
+        render_metric_grid([(f"Over {line}", f"{val}%") for line, val in pred["over_pct"].items()])
+
+        st.metric("Ambas marcam", f"{pred['ambas_marcam_pct']}%")
+
+        st.markdown("**Placares mais prováveis**")
+        st.table(pred["placares_provaveis"])
+
+        st.markdown("**Por que o modelo chegou nesses números?**")
+        st.markdown(
+            f"- {team_a} marca em média **{report_a_home.get('gols_marcados_media')}** gols/jogo em casa "
+            f"(recorte: {report_a_home.get('n_games')} jogos).\n"
+            f"- {team_b} sofre em média **{report_b_away.get('gols_sofridos_media')}** gols/jogo fora "
+            f"(recorte: {report_b_away.get('n_games')} jogos).\n"
+            f"- {team_b} marca em média **{report_b_away.get('gols_marcados_media')}** gols/jogo fora.\n"
+            f"- {team_a} sofre em média **{report_a_home.get('gols_sofridos_media')}** gols/jogo em casa.\n"
+            f"- Médias da liga usadas como referência: {round(league_avg.get('gols_casa_media', 0), 2)} "
+            f"gols/jogo em casa e {round(league_avg.get('gols_fora_media', 0), 2)} gols/jogo fora."
+        )
+
+        st.subheader("💰 Recomendações de apostas")
+        st.caption(
+            "Classificação por confiança estatística do modelo, não por retorno financeiro. "
+            "Aposte com responsabilidade: isso não é garantia de ganho, apenas uma leitura "
+            "probabilística dos dados recentes."
+        )
+        market_data = betting.build_markets(team_a, team_b, report_a_home, report_b_away, league_avg)
+        markets = market_data["mercados"]
+
+        tier_groups = {betting.TIER_GREEN: [], betting.TIER_YELLOW: [], betting.TIER_RED: []}
+        for m in markets:
+            tier_groups.setdefault(m["tier"], []).append(m)
+
+        for tier_name, items in tier_groups.items():
+            if not items:
+                continue
+            st.markdown(f"**{tier_name}**")
+            for m in items[:6]:
+                st.markdown(f"- {m['categoria']}: **{m['mercado']}** — {m['probabilidade_pct']}%")
+
+        combo = betting.best_combination(markets, n=3)
+        if combo:
+            st.markdown("**🔥 Melhor combinação (múltipla) sugerida**")
+            for leg in combo["pernas"]:
+                st.markdown(f"- {leg['categoria']}: {leg['mercado']} ({leg['probabilidade_pct']}%)")
+            st.markdown(
+                f"Probabilidade combinada aproximada: **{combo['probabilidade_combinada_pct']}%** "
+                f"— cálculo assume que os mercados são independentes entre si, o que é uma "
+                f"simplificação; mercados correlacionados (ex.: over gols e ambas marcam) tendem "
+                f"a ter chance conjunta real menor que esse produto simples."
+            )
+
+        st.caption(
+            "Fora do alcance deste sistema por falta de dado gratuito confiável: mercados de "
+            "jogadores, impacto de escalação/desfalques confirmados no dia, e cash-out (depende "
+            "da odd ao vivo da própria casa de apostas, que não temos acesso)."
+        )
+    else:
+        st.info("Sem jogos suficientes em casa/fora para calcular a estimativa de placar nesta janela.")
+
+
 def main():
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
@@ -245,118 +350,47 @@ def main():
                 icon="📅",
             )
 
+    st.divider()
+    st.subheader("📅 Próximos confrontos")
+    with st.spinner("Buscando próximos jogos..."):
+        upcoming = fixtures.load_upcoming(code, kind, extra)
+
+    selected_matchups: list[tuple[str, str]] = []
+    if upcoming.empty:
+        st.caption(
+            "Sem agenda de próximos jogos disponível de graça para esta liga no momento "
+            "(a fonte gratuita não cobre agenda futura para todas as ligas, ou não há jogos "
+            "agendados nos próximos dias)."
+        )
+    else:
+        option_map = {
+            f"{row.date:%d/%m %H:%M} — {row.home_team} × {row.away_team}": (row.home_team, row.away_team)
+            for row in upcoming.itertuples()
+        }
+        chosen_labels = st.multiselect(
+            "Selecione um ou mais confrontos para gerar o relatório de todos de uma vez",
+            list(option_map.keys()),
+        )
+        if st.button("Gerar relatórios dos confrontos selecionados", type="primary") and chosen_labels:
+            selected_matchups = [option_map[label] for label in chosen_labels]
+
+    st.divider()
+    st.markdown("**Ou escolha um confronto manualmente**")
     teams = team_list(df)
     col_a, col_b = st.columns(2)
     team_a = col_a.selectbox("Time mandante (Time A)", teams, index=0)
     team_b = col_b.selectbox("Time visitante (Time B)", teams, index=min(1, len(teams) - 1))
 
+    manual_requested = False
     if team_a == team_b:
         st.warning("Selecione dois times diferentes.")
-        return
+    elif st.button("Gerar relatório", type="primary"):
+        manual_requested = True
 
-    if st.button("Gerar relatório", type="primary"):
-        report_a_all = stats.team_report(df, team_a, last_n=last_n, venue="all")
-        report_b_all = stats.team_report(df, team_b, last_n=last_n, venue="all")
-        report_a_home = stats.team_report(df, team_a, last_n=last_n, venue="home")
-        report_b_away = stats.team_report(df, team_b, last_n=last_n, venue="away")
-        league_avg = stats.league_averages(df)
-        ratings = elo.compute_ratings(df)
+    matchups_to_render = selected_matchups or ([(team_a, team_b)] if manual_requested else [])
 
-        st.divider()
-        st.header(f"{team_a} × {team_b}")
-        col1, col2 = st.columns(2)
-        render_team_card(col1, report_a_all, ratings.get(team_a))
-        render_team_card(col2, report_b_all, ratings.get(team_b))
-
-        st.divider()
-        st.subheader("Cruzamento de dados")
-        findings = crossing.cross_analysis(report_a_all, report_b_all)
-        if not findings:
-            st.write("Dados insuficientes para cruzamento nesta janela.")
-        for f in findings:
-            tag = ""
-            if f.get("favor_a"):
-                tag = f"🟢 favorece {team_a}"
-            elif f.get("favor_b"):
-                tag = f"🟢 favorece {team_b}"
-            st.markdown(f"**{f['indicador']}** — {team_a}: `{f['time_a']}` · {team_b}: `{f['time_b']}` {tag}")
-            st.caption(f["explicacao"])
-
-        if report_a_home.get("n_games") and report_b_away.get("n_games"):
-            st.divider()
-            st.subheader("Estimativa de placar (Poisson)")
-            pred = poisson_model.predict(report_a_home, report_b_away, league_avg)
-
-            st.caption(
-                f"Gols esperados: {team_a} {pred['xg_casa']} × {pred['xg_fora']} {team_b} "
-                f"(baseado no ataque de {team_a} em casa e defesa de {team_b} fora, e vice-versa)."
-            )
-            render_metric_grid([
-                (f"Vitória {team_a}", f"{pred['vitoria_casa_pct']}%"),
-                ("Empate", f"{pred['empate_pct']}%"),
-                (f"Vitória {team_b}", f"{pred['vitoria_fora_pct']}%"),
-            ])
-
-            st.markdown("**Gols (Over)**")
-            render_metric_grid([(f"Over {line}", f"{val}%") for line, val in pred["over_pct"].items()])
-
-            st.metric("Ambas marcam", f"{pred['ambas_marcam_pct']}%")
-
-            st.markdown("**Placares mais prováveis**")
-            st.table(pred["placares_provaveis"])
-
-            st.markdown("**Por que o modelo chegou nesses números?**")
-            st.markdown(
-                f"- {team_a} marca em média **{report_a_home.get('gols_marcados_media')}** gols/jogo em casa "
-                f"(recorte: {report_a_home.get('n_games')} jogos).\n"
-                f"- {team_b} sofre em média **{report_b_away.get('gols_sofridos_media')}** gols/jogo fora "
-                f"(recorte: {report_b_away.get('n_games')} jogos).\n"
-                f"- {team_b} marca em média **{report_b_away.get('gols_marcados_media')}** gols/jogo fora.\n"
-                f"- {team_a} sofre em média **{report_a_home.get('gols_sofridos_media')}** gols/jogo em casa.\n"
-                f"- Médias da liga usadas como referência: {round(league_avg.get('gols_casa_media', 0), 2)} "
-                f"gols/jogo em casa e {round(league_avg.get('gols_fora_media', 0), 2)} gols/jogo fora."
-            )
-
-            st.divider()
-            st.subheader("💰 Recomendações de apostas")
-            st.caption(
-                "Classificação por confiança estatística do modelo, não por retorno financeiro. "
-                "Aposte com responsabilidade: isso não é garantia de ganho, apenas uma leitura "
-                "probabilística dos dados recentes."
-            )
-            market_data = betting.build_markets(team_a, team_b, report_a_home, report_b_away, league_avg)
-            markets = market_data["mercados"]
-
-            tier_groups = {betting.TIER_GREEN: [], betting.TIER_YELLOW: [], betting.TIER_RED: []}
-            for m in markets:
-                tier_groups.setdefault(m["tier"], []).append(m)
-
-            for tier_name, items in tier_groups.items():
-                if not items:
-                    continue
-                st.markdown(f"**{tier_name}**")
-                for m in items[:6]:
-                    st.markdown(f"- {m['categoria']}: **{m['mercado']}** — {m['probabilidade_pct']}%")
-
-            combo = betting.best_combination(markets, n=3)
-            if combo:
-                st.markdown("**🔥 Melhor combinação (múltipla) sugerida**")
-                for leg in combo["pernas"]:
-                    st.markdown(f"- {leg['categoria']}: {leg['mercado']} ({leg['probabilidade_pct']}%)")
-                st.markdown(
-                    f"Probabilidade combinada aproximada: **{combo['probabilidade_combinada_pct']}%** "
-                    f"— cálculo assume que os mercados são independentes entre si, o que é uma "
-                    f"simplificação; mercados correlacionados (ex.: over gols e ambas marcam) tendem "
-                    f"a ter chance conjunta real menor que esse produto simples."
-                )
-
-            st.caption(
-                "Fora do alcance deste sistema por falta de dado gratuito confiável: mercados de "
-                "jogadores, impacto de escalação/desfalques confirmados no dia, e cash-out (depende "
-                "da odd ao vivo da própria casa de apostas, que não temos acesso)."
-            )
-        else:
-            st.info("Sem jogos suficientes em casa/fora para calcular a estimativa de placar nesta janela.")
+    for home, away in matchups_to_render:
+        render_matchup_report(df, home, away, last_n)
 
     st.divider()
     st.caption(

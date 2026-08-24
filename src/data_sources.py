@@ -174,3 +174,42 @@ def clear_cache(code: str, kind: str) -> None:
     pattern = f"{code}_all.csv" if kind == "basic" else f"{code}_*.csv"
     for f in CACHE_DIR.glob(pattern):
         f.unlink(missing_ok=True)
+
+
+# --- Próximos confrontos (agenda futura) ---
+#
+# football-data.co.uk também publica um único CSV (compartilhado entre
+# ligas) com os próximos jogos ainda não realizados — só cobre as ligas
+# "completas" (as mesmas de FULL_STAT_LEAGUES), com poucos dias de agenda
+# à frente (a própria fonte só disponibiliza isso). Ligas "básicas" não têm
+# essa agenda disponível de graça.
+
+FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+FIXTURES_CACHE_FILE = CACHE_DIR / "fixtures_upcoming.csv"
+
+
+def load_upcoming_fixtures(code: str) -> pd.DataFrame:
+    """Próximos jogos ainda não realizados dessa liga (só ligas 'full').
+    Retorna colunas: date, home_team, away_team. Vazio se a fonte não cobrir
+    essa liga ou não houver jogos agendados nos próximos dias."""
+    empty = pd.DataFrame(columns=["date", "home_team", "away_team"])
+    raw = _fetch(FIXTURES_URL, FIXTURES_CACHE_FILE)
+    if not raw:
+        return empty
+    try:
+        df = pd.read_csv(pd.io.common.BytesIO(raw))
+    except Exception:
+        return empty
+    if "Div" not in df.columns or code not in set(df["Div"].unique()):
+        return empty
+
+    sub = df[df["Div"] == code].copy()
+    time_str = sub["Time"].fillna("00:00") if "Time" in sub.columns else "00:00"
+    sub["date"] = pd.to_datetime(
+        sub["Date"].astype(str) + " " + time_str.astype(str),
+        dayfirst=True, errors="coerce",
+    )
+    sub = sub.rename(columns={"HomeTeam": "home_team", "AwayTeam": "away_team"})
+    sub = sub.dropna(subset=["date", "home_team", "away_team"])
+    sub = sub[sub["date"] >= pd.Timestamp.now() - pd.Timedelta(hours=3)]  # tira jogos já iniciados/velhos do arquivo
+    return sub[["date", "home_team", "away_team"]].sort_values("date").reset_index(drop=True)

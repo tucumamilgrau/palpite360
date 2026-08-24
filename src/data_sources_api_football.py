@@ -344,6 +344,61 @@ def _fixtures_from_day_scan(league_id: int, country: str) -> pd.DataFrame:
     return _normalize(fixtures, country)
 
 
+FORWARD_SCAN_DAYS = 10  # quantos dias à frente varremos para achar próximos confrontos
+
+
+def advance_forward_scan(days: int = FORWARD_SCAN_DAYS) -> int:
+    """Varre alguns dias à frente de hoje (mesmo endpoint /fixtures?date=,
+    sem bloqueio de plano) para descobrir próximos confrontos agendados.
+    Gratuito, poucas chamadas — só roda quando a tela de 'próximos
+    confrontos' é aberta, não em toda carga de liga."""
+    today = dt.date.today()
+    calls = 0
+    for i in range(1, days + 1):
+        d = today + dt.timedelta(days=i)
+        cache_path = CACHE_DIR / f"day_{d.isoformat()}.json"
+        if _cache_get(cache_path, DAY_CACHE_RECENT_HOURS) is not None:
+            continue
+        if _fetch_day(d.isoformat(), is_recent=True):
+            calls += 1
+        else:
+            break
+    return calls
+
+
+def upcoming_fixtures(league_id: int, country: str, days_ahead: int = FORWARD_SCAN_DAYS) -> pd.DataFrame:
+    """Próximos confrontos ainda não realizados dessa liga, varrendo os
+    próximos `days_ahead` dias (inclui hoje, caso ainda tenha jogo por vir)."""
+    advance_forward_scan(days_ahead)
+    today = dt.date.today()
+    rows = []
+    for i in range(0, days_ahead + 1):
+        d = today + dt.timedelta(days=i)
+        cache_path = CACHE_DIR / f"day_{d.isoformat()}.json"
+        cached = _cache_get(cache_path, DAY_CACHE_RECENT_HOURS * 2)
+        if not cached:
+            continue
+        for fx in cached.get("response", []):
+            if fx.get("league", {}).get("id") != league_id:
+                continue
+            status = fx.get("fixture", {}).get("status", {}).get("short")
+            if status in ("FT", "AET", "PEN", "PST", "CANC", "ABD"):
+                continue
+            home = fx.get("teams", {}).get("home", {}).get("name")
+            away = fx.get("teams", {}).get("away", {}).get("name")
+            date_str = fx.get("fixture", {}).get("date")
+            if not home or not away or not date_str:
+                continue
+            rows.append({
+                "date": pd.to_datetime(date_str, errors="coerce", utc=True).tz_localize(None),
+                "home_team": home,
+                "away_team": away,
+            })
+    if not rows:
+        return pd.DataFrame(columns=["date", "home_team", "away_team"])
+    return pd.DataFrame(rows).drop_duplicates().sort_values("date").reset_index(drop=True)
+
+
 MIN_RECENT_MATCHES = 15  # abaixo disso, complementa com as temporadas antigas (2022-2024)
 
 

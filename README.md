@@ -9,6 +9,10 @@ Relatórios comparativos entre duas equipes com base em dados históricos reais
 
 - Baixa dados históricos reais de partidas (gratuito, sem chave de API) de
   [football-data.co.uk](https://www.football-data.co.uk/).
+- Lista os **próximos confrontos** de cada liga (quando a fonte gratuita
+  disponibiliza agenda futura) e deixa selecionar vários de uma vez para
+  gerar o relatório completo de todos juntos, sem precisar repetir o
+  processo confronto por confronto.
 - Para cada time, calcula: aproveitamento, gols marcados/sofridos, jogos sem
   sofrer/marcar, % Over 0.5/1.5/2.5/3.5, % ambas marcam, e (quando a liga
   disponibiliza) finalizações, escanteios e cartões — com peso maior para
@@ -39,6 +43,13 @@ Relatórios comparativos entre duas equipes com base em dados históricos reais
 
 ## Cobertura de dados
 
+- **Agenda de próximos jogos**: ligas "completas" (Europa) via
+  `fixtures.csv` do football-data.co.uk — cobre normalmente só a rodada
+  mais próxima, a fonte não disponibiliza uma agenda longa de graça. Ligas
+  via API-Football (África/Sul-Americanas) mostram os próximos ~10 dias,
+  usando a mesma varredura por data do histórico recente. Ligas "básicas"
+  (Brasil Série A, Argentina, etc.) não têm agenda futura gratuita
+  disponível — o app avisa isso na tela em vez de fingir que tem.
 - **Ligas com estatísticas completas** (chutes, escanteios, cartões, árbitro),
   via football-data.co.uk, sem chave de API: Inglaterra (4 divisões +
   National League), Escócia (4 divisões), Alemanha, Itália, Espanha, França
@@ -156,6 +167,7 @@ src/crossing.py                 Cruzamento entre as duas equipes
 src/poisson_model.py            Estimativa de gols/escanteios/cartões (Poisson)
 src/betting.py                  Classificação de mercados por confiança + combinações
 src/elo.py                      Rating Elo simplificado
+src/fixtures.py                 Próximos confrontos (agenda futura), unifica as duas fontes
 .streamlit/config.toml          Tema visual (cores, fundo escuro)
 assets/logo.png                 Logo da marca (favicon + cabeçalho)
 config/api_football_key.txt     Sua chave da API-Football (não versionado)
