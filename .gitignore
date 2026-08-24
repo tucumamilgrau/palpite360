@@ -1,0 +1,5 @@
+data/cache/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+config/api_football_key.txt
